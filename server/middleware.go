@@ -17,8 +17,29 @@ func (server *Server) wrapLogger(handler http.Handler) http.Handler {
 
 func (server *Server) wrapHeaders(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// todo add version
 		w.Header().Set("Server", "GoTTY")
+		handler.ServeHTTP(w, r)
+	})
+}
+
+func (server *Server) wrapGoogleOAuth(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == LOGIN_PAGE_PATH || path == GOOGLE_LOGIN_PATH || path == GOOGLE_CALLBACK_PATH {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		token := server.jwt.GetTokenFromCookie(server.jwtCookieStore, r)
+		googleEmail, err := server.jwt.ParseAndValidateToken(token)
+		if err != nil {
+			http.Redirect(w, r, LOGIN_PAGE_PATH, http.StatusFound)
+			return
+		}
+		if err := server.checkGoogleUserPermissions(googleEmail); err != nil {
+			log.Println(err)
+			http.Redirect(w, r, err.Error(), http.StatusForbidden)
+			return
+		}
 		handler.ServeHTTP(w, r)
 	})
 }

@@ -78,3 +78,7 @@ release:
 
 clean:
 	rm -fr gotty builds js/dist bindata/static js/node_modules
+
+go := $(shell which go)
+run: Makefile
+	$(go) run main.go --config $(CURDIR)/.gotty.example bash
