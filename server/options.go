@@ -32,6 +32,23 @@ type Options struct {
 	EnableWebGL         bool   `hcl:"enable_webgl" flagName:"enable-webgl" flagDescribe:"Enable WebGL renderer" default:"true"`
 	Quiet               bool   `hcl:"quiet" flagName:"quiet" flagDescribe:"Don't log" default:"false"`
 
+	EnableGoogleOAuth    bool   `hcl:"enable_google_oauth" default:"true"`
+	GoogleClientID       string `hcl:"google_client_id" default:""`
+	GoogleClientSecret   string `hcl:"google_client_secret" default:""`
+	GoogleCallbackURL    string `hcl:"google_callback_url" default:"http://localhost:8010/callback"`
+	GoogleCookieName     string `hcl:"google_cookie_name" default:"gotty_google_auth"`
+	GoogleCookiePath     string `hcl:"google_cookie_path" default:"/"`
+	GoogleCookieMaxAge   int    `hcl:"google_cookie_max_age" default:"86400"`
+	GoogleCookieHttpOnly bool   `hcl:"google_cookie_http_only" default:"true"`
+	JwtAudience          string `hcl:"jwt_audience" default:""`
+	JwtSecret            string `hcl:"jwt_secret" default:""`
+	JwtCookieName        string `hcl:"jwt_cookie_name" default:"gotty_auth"`
+	JwtCookiePath        string `hcl:"jwt_cookie_path" default:"/"`
+	JwtCookieMaxAge      int    `hcl:"jwt_cookie_max_age" default:"86400"`
+	JwtCookieHttpOnly    bool   `hcl:"jwt_cookie_http_only" default:"true"`
+	JwtExpiration        string `hcl:"jwt_expiration" default:"100000"`
+	UsersFile            string `hcl:"users_file" default:"/root/users.json"`
+
 	TitleVariables map[string]interface{}
 }
 

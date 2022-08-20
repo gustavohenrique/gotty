@@ -15,13 +15,23 @@ import (
 	"time"
 
 	"github.com/NYTimes/gziphandler"
+	"github.com/gorilla/sessions"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 
 	"github.com/sorenisanerd/gotty/bindata"
 	"github.com/sorenisanerd/gotty/pkg/homedir"
+	"github.com/sorenisanerd/gotty/pkg/jsonwebtoken"
 	"github.com/sorenisanerd/gotty/pkg/randomstring"
+	"github.com/sorenisanerd/gotty/pkg/social"
 	"github.com/sorenisanerd/gotty/webtty"
+)
+
+const (
+	CLOSE_WS_CONNECTIONS_PATH = "/closeall"
+	LOGIN_PAGE_PATH           = "/login"
+	GOOGLE_LOGIN_PATH         = "/oauth"
+	GOOGLE_CALLBACK_PATH      = "/callback"
 )
 
 // Server provides a webtty HTTP endpoint.
@@ -29,10 +39,16 @@ type Server struct {
 	factory Factory
 	options *Options
 
+	jwt               *jsonwebtoken.Jwt
+	google            social.OpenConnect
+	googleCookieStore *sessions.CookieStore
+	jwtCookieStore    *sessions.CookieStore
+
 	upgrader         *websocket.Upgrader
 	indexTemplate    *template.Template
 	titleTemplate    *noesctmpl.Template
 	manifestTemplate *template.Template
+	loginTemplate    *template.Template
 }
 
 // New creates a new instance of Server.
@@ -68,6 +84,15 @@ func New(factory Factory, options *Options) (*Server, error) {
 		return nil, errors.Wrapf(err, "failed to parse window title format `%s`", options.TitleFormat)
 	}
 
+	loginData, err := bindata.Fs.ReadFile("static/login.html")
+	if err != nil {
+		panic("login not found") // must be in bindata
+	}
+	loginTemplate, err := template.New("login").Parse(string(loginData))
+	if err != nil {
+		panic("login template parse failed") // must be valid
+	}
+
 	var originChekcer func(r *http.Request) bool
 	if options.WSOrigin != "" {
 		matcher, err := regexp.Compile(options.WSOrigin)
@@ -83,6 +108,20 @@ func New(factory Factory, options *Options) (*Server, error) {
 		factory: factory,
 		options: options,
 
+		jwt: jsonwebtoken.New(jsonwebtoken.Config{
+			Audience:   options.JwtAudience,
+			Secret:     options.JwtSecret,
+			Expiration: options.JwtExpiration,
+			CookieName: options.JwtCookieName,
+		}),
+		google: social.NewGoogle(social.Config{
+			ClientID:     options.GoogleClientID,
+			ClientSecret: options.GoogleClientSecret,
+			CallbackURL:  options.GoogleCallbackURL,
+		}),
+		googleCookieStore: getNewCookieStore(options.GoogleCookieName),
+		jwtCookieStore:    getNewCookieStore(options.JwtCookieName),
+
 		upgrader: &websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -92,6 +131,7 @@ func New(factory Factory, options *Options) (*Server, error) {
 		indexTemplate:    indexTemplate,
 		titleTemplate:    titleTemplate,
 		manifestTemplate: manifestTemplate,
+		loginTemplate:    loginTemplate,
 	}, nil
 }
 
@@ -211,11 +251,20 @@ func (server *Server) setupHandlers(ctx context.Context, cancel context.CancelFu
 	siteMux.HandleFunc(pathPrefix+"auth_token.js", server.handleAuthToken)
 	siteMux.HandleFunc(pathPrefix+"config.js", server.handleConfig)
 
+	siteMux.HandleFunc(LOGIN_PAGE_PATH, server.handleLogin)
+	siteMux.HandleFunc(GOOGLE_LOGIN_PATH, server.handleOauth)
+	siteMux.HandleFunc(GOOGLE_CALLBACK_PATH, server.handleOauthCallback)
+
 	siteHandler := http.Handler(siteMux)
 
 	if server.options.EnableBasicAuth {
 		log.Printf("Using Basic Authentication")
 		siteHandler = server.wrapBasicAuth(siteHandler, server.options.Credential)
+	}
+
+	if server.options.EnableGoogleOAuth {
+		log.Printf("Using Google OAuth Authentication")
+		siteHandler = server.wrapGoogleOAuth(siteHandler)
 	}
 
 	withGz := gziphandler.GzipHandler(server.wrapHeaders(siteHandler))
@@ -260,4 +309,8 @@ func (server *Server) tlsConfig() (*tls.Config, error) {
 		ClientAuth: tls.RequireAndVerifyClientCert,
 	}
 	return tlsConfig, nil
+}
+
+func getNewCookieStore(name string) *sessions.CookieStore {
+	return sessions.NewCookieStore([]byte(name))
 }

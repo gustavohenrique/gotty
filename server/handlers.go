@@ -8,11 +8,14 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"sync/atomic"
 
+	"github.com/gorilla/sessions"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 
+	"github.com/sorenisanerd/gotty/pkg/randomstring"
 	"github.com/sorenisanerd/gotty/webtty"
 )
 
@@ -72,7 +75,8 @@ func (server *Server) generateHandleWS(ctx context.Context, cancel context.Cance
 		}
 		defer conn.Close()
 
-		err = server.processWSConn(ctx, conn)
+		token := server.jwt.GetTokenFromCookie(server.jwtCookieStore, r)
+		err = server.processWSConn(ctx, conn, token)
 
 		switch err {
 		case ctx.Err():
@@ -87,7 +91,7 @@ func (server *Server) generateHandleWS(ctx context.Context, cancel context.Cance
 	}
 }
 
-func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn) error {
+func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn, token string) error {
 	typ, initLine, err := conn.ReadMessage()
 	if err != nil {
 		return errors.Wrapf(err, "failed to authenticate websocket connection")
@@ -101,7 +105,8 @@ func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn) e
 	if err != nil {
 		return errors.Wrapf(err, "failed to authenticate websocket connection")
 	}
-	if init.AuthToken != server.options.Credential {
+	// if init.AuthToken != server.options.Credential {
+	if init.AuthToken != token {
 		return errors.New("failed to authenticate websocket connection")
 	}
 
@@ -164,6 +169,98 @@ func (server *Server) processWSConn(ctx context.Context, conn *websocket.Conn) e
 	return err
 }
 
+func (server *Server) handleOauth(w http.ResponseWriter, r *http.Request) {
+	hash := randomstring.Generate(32)
+	server.createGoogleCookieWithHash(w, r, hash)
+	redirectURL := server.google.GetRedirectUrl(hash)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+func (server *Server) handleOauthCallback(w http.ResponseWriter, r *http.Request) {
+	retrievedState := server.getHashFromGoogleCookie(r)
+	queryState := server.google.GetKeyFromURL(r)
+	if retrievedState != queryState {
+		http.Error(w, "Invalid Google credentials", http.StatusUnauthorized)
+		return
+	}
+	code := server.google.GetCodeFromURL(r)
+	googleUser, err := server.google.FetchUserByCode(code)
+	if err != nil {
+		http.Error(w, "Cannot found user by code "+code, http.StatusNotFound)
+		return
+	}
+	if err := server.checkGoogleUserPermissions(googleUser.Email); err != nil {
+		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	token, err := server.jwt.GenerateToken(googleUser.Email)
+	if err != nil {
+		http.Error(w, "Cannot generate the JWT Token ", http.StatusForbidden)
+		return
+	}
+	server.createAuthCookieWithToken(w, r, token)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (server *Server) checkGoogleUserPermissions(email string) error {
+	file := server.options.UsersFile
+	content, err := os.ReadFile(file)
+	if err != nil {
+		return errors.Wrapf(err, "cannot open users file in "+file)
+	}
+	var emails []string
+	err = json.Unmarshal(content, &emails)
+	if err != nil {
+		return errors.Wrapf(err, "cannot unmarhsal the emails list")
+	}
+	for _, e := range emails {
+		if e == email {
+			return nil
+		}
+	}
+	return errors.New("the email " + email + " do not have permission to login")
+}
+
+func (server *Server) createGoogleCookieWithHash(w http.ResponseWriter, r *http.Request, content string) {
+	options := server.options
+	cookieName := options.GoogleCookieName
+	sess, _ := server.googleCookieStore.Get(r, cookieName)
+	sess.Values[cookieName] = content
+	sess.Options = &sessions.Options{
+		Path:     options.GoogleCookiePath,
+		MaxAge:   options.GoogleCookieMaxAge,
+		HttpOnly: options.GoogleCookieHttpOnly,
+	}
+	sess.Save(r, w)
+}
+
+func (server *Server) createAuthCookieWithToken(w http.ResponseWriter, r *http.Request, content string) {
+	options := server.options
+	cookieName := options.JwtCookieName
+	sess, _ := server.jwtCookieStore.Get(r, cookieName)
+	sess.Values[cookieName] = content
+	sess.Options = &sessions.Options{
+		Path:     options.JwtCookiePath,
+		MaxAge:   options.JwtCookieMaxAge,
+		HttpOnly: options.JwtCookieHttpOnly,
+	}
+	err := sess.Save(r, w)
+	if err != nil {
+		log.Println("Failed to save session:", err)
+	}
+}
+
+func (server *Server) getHashFromGoogleCookie(req *http.Request) string {
+	cookieName := server.options.GoogleCookieName
+	sess, _ := server.googleCookieStore.Get(req, cookieName)
+	value := sess.Values[cookieName]
+	if value != nil {
+		return value.(string)
+	}
+	return ""
+}
+
 func (server *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	indexVars, err := server.indexVariables(r)
 	if err != nil {
@@ -173,6 +270,23 @@ func (server *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	indexBuf := new(bytes.Buffer)
 	err = server.indexTemplate.Execute(indexBuf, indexVars)
+	if err != nil {
+		http.Error(w, "Internal Server Error", 500)
+		return
+	}
+
+	w.Write(indexBuf.Bytes())
+}
+
+func (server *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	indexVars, err := server.indexVariables(r)
+	if err != nil {
+		http.Error(w, "Internal Server Error", 500)
+		return
+	}
+
+	indexBuf := new(bytes.Buffer)
+	err = server.loginTemplate.Execute(indexBuf, indexVars)
 	if err != nil {
 		http.Error(w, "Internal Server Error", 500)
 		return
@@ -224,7 +338,9 @@ func (server *Server) indexVariables(r *http.Request) (map[string]interface{}, e
 func (server *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
 	// @TODO hashing?
-	w.Write([]byte("var gotty_auth_token = '" + server.options.Credential + "';"))
+	// w.Write([]byte("var gotty_auth_token = '" + server.options.Credential + "';"))
+	token := server.jwt.GetTokenFromCookie(server.jwtCookieStore, r)
+	w.Write([]byte("var gotty_auth_token = '" + token + "';"))
 }
 
 func (server *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
